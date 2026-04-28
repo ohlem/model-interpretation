@@ -15,9 +15,9 @@ from sklearn.linear_model   import LogisticRegression
 from sklearn.tree           import DecisionTreeClassifier
 from sklearn.metrics        import (
     roc_auc_score, f1_score, precision_score, recall_score,
-    average_precision_score, classification_report,
+    average_precision_score,
 )
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+from sklearn.model_selection import StratifiedKFold, cross_val_score, train_test_split
 
 try:
     from xgboost import XGBClassifier
@@ -26,7 +26,7 @@ except ImportError:
     XGBOOST_AVAILABLE = False
     logging.warning("XGBoost не установлен. Используйте: pip install xgboost")
 
-from .config import MODEL_PARAMS, RANDOM_STATE, TARGET_COL
+from .config import MODEL_PARAMS, RANDOM_STATE, TARGET_COL, TEST_SIZE
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +46,8 @@ class ModelResult:
     y_pred_proba  : np.ndarray  # вероятности класса 1 на test
     metrics       : Dict[str, float] = field(default_factory=dict)
     cv_auc        : Optional[float]  = None
+    cleaning_pipeline: str | None = None
+    feature_builder: str | None = None
 
     @property
     def experiment_id(self) -> str:
@@ -111,10 +113,41 @@ def split_customer_features(
     return X_train, X_test, y_train, y_test
 
 
+def split_customer_ids(
+    customers: pd.Index | pd.Series | list,
+    targets: pd.Series,
+    test_size: float = TEST_SIZE,
+) -> tuple[list, list]:
+    """
+    Stratified train/test split over customer ids before any fitted cleaning/features.
+    """
+    customer_index = pd.Index(customers)
+    y = targets.reindex(customer_index).fillna(0).astype(int)
+    class_counts = y.value_counts()
+    stratify = y if (len(class_counts) > 1 and class_counts.min() >= 2) else None
+
+    train_ids, test_ids = train_test_split(
+        customer_index.tolist(),
+        test_size=test_size,
+        random_state=RANDOM_STATE,
+        stratify=stratify,
+    )
+    logger.info(
+        "Customer split: train=%d (pos=%.1f%%), test=%d (pos=%.1f%%)",
+        len(train_ids),
+        y.loc[train_ids].mean() * 100,
+        len(test_ids),
+        y.loc[test_ids].mean() * 100,
+    )
+    return train_ids, test_ids
+
+
 # ─── Основная функция обучения ────────────────────────────────────────────────
 
 def train_and_evaluate(
     pipeline_name  : str,
+    cleaning_pipeline: str | None,
+    feature_builder: str | None,
     model_name     : str,
     X_train        : pd.DataFrame,
     X_test         : pd.DataFrame,
@@ -151,6 +184,8 @@ def train_and_evaluate(
 
     return ModelResult(
         pipeline_name = pipeline_name,
+        cleaning_pipeline = cleaning_pipeline,
+        feature_builder = feature_builder,
         model_name    = model_name,
         model         = model,
         feature_names = list(X_train.columns),
@@ -170,9 +205,11 @@ def results_to_dataframe(results: list[ModelResult]) -> pd.DataFrame:
     rows = []
     for r in results:
         row = {
-            "pipeline"   : r.pipeline_name,
-            "model"      : r.model_name,
-            "n_features" : len(r.feature_names),
+            "pipeline": r.pipeline_name,
+            "cleaning_pipeline": r.cleaning_pipeline or r.pipeline_name,
+            "feature_builder": r.feature_builder or r.pipeline_name,
+            "model": r.model_name,
+            "n_features": len(r.feature_names),
             **r.metrics,
         }
         if r.cv_auc is not None:
