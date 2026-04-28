@@ -86,6 +86,9 @@ def plot_cleaning_impact(cleaning_csv: Path | None = None) -> None:
     path = cleaning_csv or OUTPUT_DIR / "cleaning_steps.csv"
     df   = pd.read_csv(path)
 
+    if "dataset_split" in df.columns:
+        df = df[df["dataset_split"] == "train"].copy()
+
     pipelines = df["pipeline"].unique().tolist()
     fig, axes = plt.subplots(1, len(pipelines), figsize=(6 * len(pipelines), 5),
                              sharey=False)

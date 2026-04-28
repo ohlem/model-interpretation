@@ -8,16 +8,13 @@ interpretability.py — Объяснение моделей: SHAP, LIME, Feature
 
 import logging
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import numpy as np
 import pandas as pd
 import matplotlib
 matplotlib.use("Agg")   # без GUI
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-
-from .config import PLOT_DIR, SHAP_DIR, LIME_DIR
 
 logger = logging.getLogger(__name__)
 
@@ -86,6 +83,42 @@ def plot_feature_importance(
     if save_path:
         plt.savefig(save_path, dpi=150, bbox_inches="tight")
         logger.info("Feature importance сохранён: %s", save_path)
+    plt.close()
+
+
+def plot_signed_coefficients(
+    model,
+    feature_names: list,
+    title: str,
+    save_path: Optional[Path] = None,
+    top_n: int = 15,
+) -> None:
+    """
+    Signed coefficients for linear models.
+    """
+    if not hasattr(model, "coef_"):
+        return
+
+    coef_df = (
+        pd.DataFrame({"feature": feature_names, "coef": model.coef_[0]})
+        .assign(abs_coef=lambda d: d["coef"].abs())
+        .sort_values("abs_coef", ascending=False)
+        .head(top_n)
+        .sort_values("coef")
+    )
+
+    colors = np.where(coef_df["coef"] >= 0, "#55A868", "#C44E52")
+    fig, ax = plt.subplots(figsize=(9, max(4, top_n * 0.4)))
+    ax.barh(coef_df["feature"], coef_df["coef"], color=colors, alpha=0.9)
+    ax.axvline(0, color="black", linewidth=1)
+    ax.set_xlabel("Коэффициент")
+    ax.set_title(title, fontsize=12)
+    ax.grid(axis="x", alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("Signed coefficients сохранены: %s", save_path)
     plt.close()
 
 
@@ -175,19 +208,28 @@ def compute_shap_values(model, X: pd.DataFrame) -> Optional[np.ndarray]:
             bg = shap.sample(X, 50)
             explainer = shap.KernelExplainer(model.predict_proba, bg)
             sv = explainer.shap_values(X, nsamples=100)
-            if isinstance(sv, list): sv = sv[1]
+            if isinstance(sv, list):
+                sv = sv[1] if len(sv) > 1 else sv[0]
             return np.array(sv)
-        except:
+        except Exception as fallback_error:
+            logger.warning("KernelExplainer тоже завершился с ошибкой: %s", fallback_error)
             return None
+
 
 def shap_mean_abs(shap_values: np.ndarray, feature_names: list) -> pd.DataFrame:
     """Mean |SHAP| по всем образцам. Гарантирует 1D результат для DataFrame."""
     # Берем модуль и среднее по строкам
     vals = np.abs(shap_values).mean(axis=0)
-    
+
     # Если вдруг на выходе осталась лишняя размерность (напр. (19, 1)), выпрямляем её
     if len(vals.shape) > 1:
         vals = vals.ravel()
+
+    if len(vals) != len(feature_names):
+        raise ValueError(
+            "Размерность SHAP не совпадает с числом признаков: "
+            f"{len(vals)} vs {len(feature_names)}"
+        )
 
     return pd.DataFrame({
         "feature"   : feature_names,
@@ -220,14 +262,90 @@ def plot_shap_summary(
     plt.close("all")
 
 
-def shap_mean_abs(shap_values: np.ndarray, feature_names: list) -> pd.DataFrame:
-    """Mean |SHAP| по всем образцам → ранжирование признаков."""
-    return pd.DataFrame({
-        "feature"   : feature_names,
-        "mean_abs_shap": np.abs(shap_values).mean(axis=0),
-    }).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+def plot_shap_bar(
+    shap_values: np.ndarray,
+    X: pd.DataFrame,
+    title: str,
+    save_path: Optional[Path] = None,
+    max_display: int = 15,
+) -> None:
+    if not SHAP_AVAILABLE:
+        return
+
+    shap_df = shap_mean_abs(shap_values, list(X.columns)).head(max_display).iloc[::-1]
+    fig, ax = plt.subplots(figsize=(8, max(4, max_display * 0.35)))
+    ax.barh(shap_df["feature"], shap_df["mean_abs_shap"], color="#4C72B0", alpha=0.9)
+    ax.set_xlabel("mean |SHAP|")
+    ax.set_title(title, fontsize=11)
+    ax.grid(axis="x", alpha=0.3)
+    plt.tight_layout()
+
+    if save_path:
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        logger.info("SHAP bar сохранён: %s", save_path)
+    plt.close()
 
 
+def plot_shap_dependence(
+    shap_values: np.ndarray,
+    X: pd.DataFrame,
+    feature_name: str,
+    title: str,
+    save_path: Optional[Path] = None,
+) -> None:
+    if not SHAP_AVAILABLE or feature_name not in X.columns:
+        return
+
+    try:
+        shap.dependence_plot(
+            feature_name,
+            shap_values,
+            X,
+            interaction_index=None,
+            show=False,
+        )
+        plt.title(title, fontsize=11)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+            logger.info("SHAP dependence сохранён: %s", save_path)
+        plt.close("all")
+    except Exception as exc:
+        logger.warning("SHAP dependence skipped for %s: %s", feature_name, exc)
+
+
+def plot_shap_waterfall(
+    shap_values: np.ndarray,
+    X: pd.DataFrame,
+    sample_idx: int,
+    title: str,
+    save_path: Optional[Path] = None,
+    max_display: int = 12,
+) -> None:
+    if not SHAP_AVAILABLE or len(X) == 0:
+        return
+
+    sample_idx = min(sample_idx, len(X) - 1)
+    values = np.asarray(shap_values[sample_idx]).ravel()
+    base_value = 0.0
+    data_row = X.iloc[sample_idx].values
+    explanation = shap.Explanation(
+        values=values,
+        base_values=base_value,
+        data=data_row,
+        feature_names=list(X.columns),
+    )
+
+    try:
+        shap.plots.waterfall(explanation, max_display=max_display, show=False)
+        plt.title(title, fontsize=11)
+        plt.tight_layout()
+        if save_path:
+            plt.savefig(save_path, dpi=150, bbox_inches="tight")
+            logger.info("SHAP waterfall сохранён: %s", save_path)
+        plt.close("all")
+    except Exception as exc:
+        logger.warning("SHAP waterfall skipped: %s", exc)
 def compare_shap_rankings(
     shap_list   : list[tuple[str, np.ndarray, list]],  # [(label, shap_vals, feat_names)]
     save_path   : Optional[Path] = None,
@@ -344,12 +462,60 @@ def interpretability_summary(
         row = {
             "experiment" : res.experiment_id,
             "pipeline"   : res.pipeline_name,
+            "cleaning_pipeline": res.cleaning_pipeline or res.pipeline_name,
+            "feature_builder": res.feature_builder or res.pipeline_name,
             "model"      : res.model_name,
             "n_features" : len(res.feature_names),
             "top3_fi"    : ", ".join(top3_fi),
             "roc_auc"    : res.metrics.get("roc_auc"),
             "f1"         : res.metrics.get("f1"),
         }
+        rows.append(row)
+
+    return pd.DataFrame(rows)
+
+
+def fi_shap_agreement_summary(
+    results_list: list,
+    shap_lookup: dict[str, np.ndarray],
+) -> pd.DataFrame:
+    """
+    Compare top FI and top SHAP features for each experiment.
+    """
+    rows = []
+    for res in results_list:
+        experiment_id = res.experiment_id
+        fi = get_feature_importance(res.model, res.feature_names)
+        top3_fi = fi["feature"].head(3).tolist()
+        top5_fi = fi["feature"].head(5).tolist()
+
+        row = {
+            "experiment": experiment_id,
+            "pipeline": res.pipeline_name,
+            "cleaning_pipeline": res.cleaning_pipeline or res.pipeline_name,
+            "feature_builder": res.feature_builder or res.pipeline_name,
+            "model": res.model_name,
+            "top3_fi": ", ".join(top3_fi),
+            "top5_fi": ", ".join(top5_fi),
+            "top3_shap": "",
+            "top5_shap": "",
+            "jaccard_top3": np.nan,
+            "jaccard_top5": np.nan,
+        }
+
+        shap_values = shap_lookup.get(experiment_id)
+        if shap_values is not None:
+            shap_df = shap_mean_abs(shap_values, res.feature_names)
+            top3_shap = shap_df["feature"].head(3).tolist()
+            top5_shap = shap_df["feature"].head(5).tolist()
+
+            fi3, shap3 = set(top3_fi), set(top3_shap)
+            fi5, shap5 = set(top5_fi), set(top5_shap)
+            row["top3_shap"] = ", ".join(top3_shap)
+            row["top5_shap"] = ", ".join(top5_shap)
+            row["jaccard_top3"] = round(len(fi3 & shap3) / len(fi3 | shap3), 4)
+            row["jaccard_top5"] = round(len(fi5 & shap5) / len(fi5 | shap5), 4)
+
         rows.append(row)
 
     return pd.DataFrame(rows)
