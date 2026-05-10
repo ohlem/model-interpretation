@@ -210,8 +210,17 @@ retail_preprocessing_module/
 pip install -r retail_preprocessing_module/requirements.txt
 
 # 2. Поместить CSV-файл датасета
+# скачать по ссылке с kaggle
 # online_retail_II.csv -> retail_preprocessing_module/data/
 
+# можно скачать с зеркала на Яндекс.Диске:
+
+mkdir -p retail_preprocessing_module/data/raw && \
+YANDEX_URL="https://disk.yandex.ru/d/fImKqLZ9ZcYROg" && \
+curl -L "$(curl -sG --data-urlencode "public_key=$YANDEX_URL" \
+  https://cloud-api.yandex.net/v1/disk/public/resources/download \
+  | python -c "import sys, json; print(json.load(sys.stdin)['href'])")" \
+  -o retail_preprocessing_module/data/raw/online_retail_II.csv
 # 3. Запустить все эксперименты
 python -m retail_preprocessing_module.experiment
 

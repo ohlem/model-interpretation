@@ -51,12 +51,20 @@ from .interpretability import (
     plot_signed_coefficients,
     shap_mean_abs,
 )
-from .models import MODELS, ModelResult, results_to_dataframe, split_customer_ids, train_and_evaluate
+from .models import MODELS, MODEL_ALIASES, ModelResult, results_to_dataframe, split_customer_ids, train_and_evaluate
 from .preprocessing import apply_cleaning_pipeline, fit_cleaning_pipeline
 
 
-_SCALE_FOR = {"logistic_regression"}
+_SCALE_FOR = {"logistic_regression", "logistic_regression_unbalanced"}
 DEFAULT_PIPELINES = ["baseline", "standard", "advanced"]
+BALANCING_MODELS = [
+    "logistic_regression_unbalanced",
+    "logistic_regression",
+    "decision_tree_unbalanced",
+    "decision_tree",
+    "xgboost",
+    "xgboost_balanced",
+]
 
 
 @dataclass(frozen=True)
@@ -228,6 +236,7 @@ def _save_cv_gap_summary(metrics_df: pd.DataFrame) -> pd.DataFrame:
     gap_df = metrics_df.copy()
     if "cv_auc_mean" not in gap_df.columns:
         gap_df["cv_auc_mean"] = pd.NA
+    gap_df["cv_auc_mean"] = pd.to_numeric(gap_df["cv_auc_mean"], errors="coerce")
     gap_df["cv_test_gap"] = (gap_df["cv_auc_mean"] - gap_df["roc_auc"]).round(4)
     gap_df = gap_df.sort_values(
         ["cv_test_gap", "roc_auc"],
@@ -435,6 +444,13 @@ EXPERIMENT_PROFILES = {
         "models": MODELS,
         "description": "Experiment 21: target distribution analysis",
     },
+    "exp22": {
+        "specs": _default_specs(["advanced"]),
+        "models": BALANCING_MODELS,
+        "description": (
+            "Experiment 22: class balancing impact on metrics and interpretability"
+        ),
+    },
     "exp29": {
         "specs": _default_specs(DEFAULT_PIPELINES),
         "models": MODELS,
@@ -576,7 +592,7 @@ def run_experiment(
             save_path=PLOT_DIR / f"fi_{result.experiment_id}.png",
             top_n=15,
         )
-        if result.model_name == "logistic_regression":
+        if MODEL_ALIASES.get(result.model_name) == "logistic_regression":
             plot_signed_coefficients(
                 result.model,
                 result.feature_names,
@@ -838,7 +854,7 @@ def _build_cli_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--models",
         nargs="+",
-        choices=MODELS,
+        choices=sorted(MODEL_ALIASES.keys()),
         help="Optional custom models list. Overrides --experiment models.",
     )
     parser.add_argument(

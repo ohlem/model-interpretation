@@ -56,17 +56,64 @@ class ModelResult:
 
 # ─── Фабрика моделей ──────────────────────────────────────────────────────────
 
-def _make_model(model_name: str):
-    if model_name == "logistic_regression":
-        return LogisticRegression(**MODEL_PARAMS["logistic_regression"])
+MODEL_ALIASES = {
+    "logistic_regression": "logistic_regression",
+    "decision_tree": "decision_tree",
+    "xgboost": "xgboost",
+    "logistic_regression_unbalanced": "logistic_regression",
+    "decision_tree_unbalanced": "decision_tree",
+    "xgboost_balanced": "xgboost",
+}
 
-    if model_name == "decision_tree":
-        return DecisionTreeClassifier(**MODEL_PARAMS["decision_tree"])
 
-    if model_name == "xgboost":
+def _class_balance_strategy(model_name: str) -> str:
+    if model_name in {"logistic_regression_unbalanced", "decision_tree_unbalanced"}:
+        return "none"
+    if model_name in {"logistic_regression", "decision_tree"}:
+        return "class_weight_balanced"
+    if model_name == "xgboost_balanced":
+        return "scale_pos_weight"
+    return "none"
+
+
+def _xgboost_scale_pos_weight(y_train: pd.Series | np.ndarray | None) -> float | None:
+    if y_train is None:
+        return None
+
+    y = pd.Series(y_train).astype(int)
+    positives = int((y == 1).sum())
+    negatives = int((y == 0).sum())
+    if positives == 0:
+        return None
+    return negatives / positives
+
+
+def _make_model(model_name: str, y_train: pd.Series | np.ndarray | None = None):
+    base_model_name = MODEL_ALIASES.get(model_name)
+    if base_model_name is None:
+        raise ValueError(f"Неизвестная модель: {model_name}")
+
+    if base_model_name == "logistic_regression":
+        params = MODEL_PARAMS["logistic_regression"].copy()
+        if model_name == "logistic_regression_unbalanced":
+            params["class_weight"] = None
+        return LogisticRegression(**params)
+
+    if base_model_name == "decision_tree":
+        params = MODEL_PARAMS["decision_tree"].copy()
+        if model_name == "decision_tree_unbalanced":
+            params["class_weight"] = None
+        return DecisionTreeClassifier(**params)
+
+    if base_model_name == "xgboost":
         if not XGBOOST_AVAILABLE:
             raise ImportError("XGBoost не установлен.")
-        return XGBClassifier(**MODEL_PARAMS["xgboost"])
+        params = MODEL_PARAMS["xgboost"].copy()
+        if model_name == "xgboost_balanced":
+            scale_pos_weight = _xgboost_scale_pos_weight(y_train)
+            if scale_pos_weight is not None:
+                params["scale_pos_weight"] = scale_pos_weight
+        return XGBClassifier(**params)
 
     raise ValueError(f"Неизвестная модель: {model_name}")
 
@@ -160,7 +207,7 @@ def train_and_evaluate(
     """
     logger.info("▶ Обучение: pipeline=%s  model=%s", pipeline_name, model_name)
 
-    model = _make_model(model_name)
+    model = _make_model(model_name, y_train)
     model.fit(X_train, y_train)
 
     y_pred_proba = model.predict_proba(X_test)[:, 1]
@@ -170,7 +217,7 @@ def train_and_evaluate(
     if run_cv:
         cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
         scores = cross_val_score(
-            _make_model(model_name), X_train, y_train,
+            _make_model(model_name, y_train), X_train, y_train,
             scoring="roc_auc", cv=cv, n_jobs=-1,
         )
         cv_auc = round(scores.mean(), 4)
@@ -209,6 +256,8 @@ def results_to_dataframe(results: list[ModelResult]) -> pd.DataFrame:
             "cleaning_pipeline": r.cleaning_pipeline or r.pipeline_name,
             "feature_builder": r.feature_builder or r.pipeline_name,
             "model": r.model_name,
+            "base_model": MODEL_ALIASES.get(r.model_name, r.model_name),
+            "class_balance": _class_balance_strategy(r.model_name),
             "n_features": len(r.feature_names),
             **r.metrics,
         }
